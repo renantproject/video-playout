@@ -6,7 +6,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "start": "electron .",
+    "start": "node -e \"delete process.env.ELECTRON_RUN_AS_NODE; const { spawn } = require('child_process'); spawn(require('electron'), ['.'], { stdio: 'inherit' });\"",
     "build": "tsc && vite build",
     "pack": "vite build && electron-builder --dir"
   },

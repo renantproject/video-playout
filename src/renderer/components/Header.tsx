@@ -46,6 +46,12 @@ export const Header: React.FC<HeaderProps> = ({
               <span>LIVE ON AIR</span>
             </span>
           )}
+          {broadcastStatus === 'LISTENING' && (
+            <span className="flex items-center space-x-1.5 text-blue-400 font-bold tracking-wider">
+              <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
+              <span>LISTENING (WAITING FOR RECEIVER)</span>
+            </span>
+          )}
           {broadcastStatus === 'CONNECTING' && (
             <span className="flex items-center space-x-1.5 text-amber-400 font-medium">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />

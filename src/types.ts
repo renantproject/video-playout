@@ -11,6 +11,9 @@ export interface PlaylistItem {
   thumbnail?: string // base64 data url
   fileSize?: number
   format?: string
+  needsProxy?: boolean
+  isProxyReady?: boolean
+  proxyProgress?: number
 }
 
 export type PlaybackMode = 'sequential' | 'loop_item' | 'loop_playlist' | 'manual_cue'
@@ -37,7 +40,7 @@ export interface EncodingSettings {
   gopSize: number
 }
 
-export type BroadcastStatus = 'IDLE' | 'CONNECTING' | 'LIVE' | 'ERROR' | 'RECONNECTING'
+export type BroadcastStatus = 'IDLE' | 'CONNECTING' | 'LISTENING' | 'LIVE' | 'ERROR' | 'RECONNECTING'
 
 export interface BroadcastTelemetry {
   status: BroadcastStatus
@@ -64,6 +67,9 @@ export interface ElectronAPI {
   sendToSecondaryWindow: (channel: string, data: any) => void
   onReceiveFromPrimaryWindow: (callback: (channel: string, data: any) => void) => () => void
   isSecondaryWindow: () => boolean
+  onProxyProgress: (callback: (data: { filePath: string; progress: number; status: 'processing' | 'ready' | 'error' }) => void) => () => void
+  checkProxyReady: (filePath: string) => Promise<boolean>
+  generateProxy: (filePath: string) => Promise<string>
 }
 
 declare global {

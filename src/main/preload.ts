@@ -40,6 +40,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   isSecondaryWindow: () => {
     return window.location.search.includes('mode=secondary')
-  }
+  },
+
+  onProxyProgress: (callback: (data: { filePath: string; progress: number; status: 'processing' | 'ready' | 'error' }) => void) => {
+    const handler = (_event: any, data: any) => callback(data)
+    ipcRenderer.on('proxy:progress', handler)
+    return () => ipcRenderer.removeListener('proxy:progress', handler)
+  },
+
+  checkProxyReady: (filePath: string) => ipcRenderer.invoke('proxy:check', filePath),
+
+  generateProxy: (filePath: string) => ipcRenderer.invoke('proxy:generate', filePath)
 })
 

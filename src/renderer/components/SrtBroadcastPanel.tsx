@@ -9,7 +9,9 @@ import {
   AlertTriangle,
   Lock,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Copy,
+  Check
 } from 'lucide-react'
 import { SrtConfig, SrtMode, BroadcastTelemetry } from '../../types'
 
@@ -31,6 +33,14 @@ export const SrtBroadcastPanel: React.FC<SrtBroadcastPanelProps> = ({
   isBroadcasting
 }) => {
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [isCopied, setIsCopied] = useState(false)
+
+  const handleCopyReceiverUrl = () => {
+    const url = `srt://127.0.0.1:${config.port || 9000}`
+    navigator.clipboard.writeText(url)
+    setIsCopied(true)
+    setTimeout(() => setIsCopied(false), 2000)
+  }
 
   const handleModeChange = (mode: SrtMode) => {
     onChangeConfig({
@@ -137,6 +147,25 @@ export const SrtBroadcastPanel: React.FC<SrtBroadcastPanelProps> = ({
           </button>
         </div>
 
+        {/* Receiver URL Helper (when in Listener mode) */}
+        {config.mode === 'listener' && (
+          <div className="flex items-center space-x-2 bg-[#181d2a] px-3 py-1.5 rounded-lg border border-blue-500/30 text-xs">
+            <span className="text-[10px] text-gray-400 uppercase font-sans font-semibold">URL Player (VLC / OBS):</span>
+            <span className="font-mono font-bold text-white bg-black/40 px-2 py-0.5 rounded border border-white/5 select-all">
+              srt://127.0.0.1:{config.port || 9000}
+            </span>
+            <button
+              onClick={handleCopyReceiverUrl}
+              className="flex items-center space-x-1 px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-500/30 transition-colors"
+              title="Salin URL SRT ke Clipboard"
+            >
+              {isCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+              <span className="text-[10px]">{isCopied ? 'Tersalin!' : 'Salin URL'}</span>
+            </button>
+            <span className="text-[10px] text-gray-500 hidden xl:inline">*(Gunakan 127.0.0.1, bukan localhost)*</span>
+          </div>
+        )}
+
         {/* Right: Broadcast Trigger Button */}
         <div className="flex items-center space-x-3">
           {isBroadcasting ? (
@@ -198,6 +227,11 @@ export const SrtBroadcastPanel: React.FC<SrtBroadcastPanelProps> = ({
               <span className="text-red-400 font-bold flex items-center space-x-1">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-live-pulse" />
                 <span>LIVE</span>
+              </span>
+            ) : telemetry.status === 'LISTENING' ? (
+              <span className="text-blue-400 font-bold flex items-center space-x-1">
+                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                <span>LISTENING (MENUNGGU PENERIMA)</span>
               </span>
             ) : telemetry.status === 'CONNECTING' ? (
               <span className="text-amber-400 font-bold">CONNECTING</span>

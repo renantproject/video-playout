@@ -219,6 +219,18 @@ export const PlaylistQueue: React.FC<PlaylistQueueProps> = ({
                     <span>{item.resolution}</span>
                     <span>•</span>
                     <span>{item.fps}fps</span>
+                    {item.needsProxy && (
+                      <>
+                        <span>•</span>
+                        <span className={`px-1 py-0.5 rounded text-[9px] font-sans font-bold ${
+                          item.isProxyReady
+                            ? 'bg-blue-900/60 text-blue-300 border border-blue-500/30'
+                            : 'bg-amber-900/60 text-amber-300 border border-amber-500/30 animate-pulse'
+                        }`}>
+                          {item.isProxyReady ? 'MXF' : 'MXF SYNC'}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
 

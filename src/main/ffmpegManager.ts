@@ -4,6 +4,7 @@ import fs from 'fs'
 import os from 'os'
 import { PlaylistItem, SrtConfig, EncodingSettings, BroadcastTelemetry, BroadcastStatus } from '../types'
 import { getBinPath } from './ffmpegUtils'
+import { getPlayablePath } from './proxyService'
 
 export class FfmpegManager {
   private process: ChildProcess | null = null
@@ -69,8 +70,9 @@ export class FfmpegManager {
 
     let content = 'ffconcat version 1.0\n'
     for (const item of orderedItems) {
-      // In ffconcat file: escape single quotes and use forward slashes
-      const safePath = item.filePath.replace(/\\/g, '/').replace(/'/g, "'\\''")
+      // In ffconcat file: use normalized playable proxy path for non-native containers (e.g. MXF)
+      const targetPath = getPlayablePath(item.filePath)
+      const safePath = targetPath.replace(/\\/g, '/').replace(/'/g, "'\\''")
       content += `file '${safePath}'\n`
     }
 
@@ -99,7 +101,11 @@ export class FfmpegManager {
     this.currentIdx = startIdx
     this.currentClip = playlist[startIdx]?.fileName || ''
 
-    this.updateStatus('CONNECTING')
+    if (config.mode === 'listener') {
+      this.updateStatus('LISTENING')
+    } else {
+      this.updateStatus('CONNECTING')
+    }
 
     try {
       // Create concat playlist file
@@ -108,10 +114,10 @@ export class FfmpegManager {
       // Build SRT target URL
       // Latency in microseconds: ms * 1000
       const latencyUs = (config.latency || 200) * 1000
-      let srtUrl = `srt://${config.host || '127.0.0.1'}:${config.port || 9000}?mode=${config.mode}&latency=${latencyUs}&pkt_size=1316`
+      let srtUrl = `srt://${config.host || '127.0.0.1'}:${config.port || 9000}?mode=${config.mode}&transtype=live&latency=${latencyUs}&pkt_size=1316`
 
       if (config.mode === 'listener') {
-        srtUrl = `srt://0.0.0.0:${config.port || 9000}?mode=listener&latency=${latencyUs}&pkt_size=1316`
+        srtUrl = `srt://0.0.0.0:${config.port || 9000}?mode=listener&transtype=live&latency=${latencyUs}&pkt_size=1316`
       }
 
       if (config.streamId && config.streamId.trim().length > 0) {
@@ -174,6 +180,7 @@ export class FfmpegManager {
         '-c:a', 'aac',
         '-b:a', `${settings.audioBitrate || 128}k`,
         '-ar', '48000',
+        '-ac', '2',
         '-f', 'mpegts',
         '-progress', 'pipe:1',
         '-stats_period', '0.5',
@@ -203,8 +210,8 @@ export class FfmpegManager {
       this.process.stderr?.on('data', (chunk) => {
         const text = chunk.toString()
         stderrBuffer += text
-        // Check for active transmission signals
-        if (this.status === 'CONNECTING' && (text.includes('Output #0, mpegts') || text.includes('frame='))) {
+        // In caller or listener mode, detect active output frames
+        if ((this.status === 'CONNECTING' || this.status === 'LISTENING') && (text.includes('Output #0, mpegts') || text.includes('frame='))) {
           this.updateStatus('LIVE')
         }
 
@@ -226,24 +233,33 @@ export class FfmpegManager {
         this.process = null
 
         if (!this.userStopped) {
-          // If ended unexpectedly, attempt reconnect or set IDLE/ERROR
-          if (code === 0) {
-            this.updateStatus('IDLE')
+          if (this.currentConfig?.mode === 'listener') {
+            // In listener mode, client (VLC/OBS) disconnected.
+            // Automatically re-open the listener socket after 1.5s delay to clear TIME_WAIT.
+            console.log('[FFmpegManager] Receiver disconnected in listener mode. Re-listening...')
+            this.updateStatus('LISTENING')
+            this.attemptReconnect(1500)
           } else {
-            this.updateStatus('ERROR', `FFmpeg exited with error code ${code}`)
-            this.attemptReconnect()
+            if (code === 0) {
+              this.updateStatus('IDLE')
+            } else {
+              this.updateStatus('ERROR', `FFmpeg exited with error code ${code}`)
+              this.attemptReconnect(3000)
+            }
           }
         } else {
           this.updateStatus('IDLE')
         }
       })
 
-      // Transition to LIVE once output pipe starts running
-      setTimeout(() => {
-        if (this.process && this.status === 'CONNECTING') {
-          this.updateStatus('LIVE')
-        }
-      }, 1500)
+      // In caller mode, if output pipe connects within 2s, mark LIVE
+      if (config.mode === 'caller') {
+        setTimeout(() => {
+          if (this.process && this.status === 'CONNECTING') {
+            this.updateStatus('LIVE')
+          }
+        }, 2000)
+      }
 
       return { success: true }
     } catch (err: any) {
@@ -285,16 +301,18 @@ export class FfmpegManager {
     }
   }
 
-  private attemptReconnect() {
+  private attemptReconnect(delayMs: number = 3000) {
     if (this.userStopped || !this.currentConfig || !this.currentSettings) return
-    this.updateStatus('RECONNECTING', 'Koneksi SRT terputus. Mencoba reconnect otomatis dalam 3 detik...')
+    if (this.currentConfig.mode !== 'listener') {
+      this.updateStatus('RECONNECTING', `Koneksi SRT terputus. Mencoba reconnect otomatis dalam ${Math.round(delayMs / 1000)} detik...`)
+    }
     
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = setTimeout(() => {
       if (!this.userStopped && this.currentPlaylist.length > 0 && this.currentConfig && this.currentSettings) {
         this.startBroadcast(this.currentPlaylist, this.currentConfig, this.currentSettings, this.currentIdx)
       }
-    }, 3000)
+    }, delayMs)
   }
 
   public updatePlaylist(playlist: PlaylistItem[], currentIdx: number) {

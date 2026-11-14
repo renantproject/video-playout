@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 import { Readable } from 'stream'
 import { FfmpegManager } from './ffmpegManager'
 import { extractMetadata } from './metadataService'
+import { needsProxy, isProxyReady, ensureProxy, getProxyPath } from './proxyService'
 import { PlaylistItem, SrtConfig, EncodingSettings } from '../types'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -41,6 +42,7 @@ function getMimeType(filePath: string): string {
     case '.avi': return 'video/x-msvideo'
     case '.ts': return 'video/mp2t'
     case '.webm': return 'video/webm'
+    case '.mxf': return 'video/mp4' // Handled via H.264 MP4 proxy
     default: return 'application/octet-stream'
   }
 }
@@ -74,11 +76,27 @@ function resolveFilePathFromUrl(url: string): string {
 function setupMediaProtocol() {
   protocol.handle('media-file', async (request) => {
     try {
-      const filePath = resolveFilePathFromUrl(request.url)
+      const originalFilePath = resolveFilePathFromUrl(request.url)
+      let filePath = originalFilePath
 
-      if (!fs.existsSync(filePath)) {
-        console.error('[Media Protocol] File not found:', filePath, 'from request URL:', request.url)
-        return new Response('File not found: ' + filePath, { status: 404 })
+      if (!fs.existsSync(originalFilePath)) {
+        console.error('[Media Protocol] File not found:', originalFilePath, 'from request URL:', request.url)
+        return new Response('File not found: ' + originalFilePath, { status: 404 })
+      }
+
+      // Check if file is non-native format (like MXF) that Chromium cannot demux/decode
+      if (needsProxy(originalFilePath)) {
+        if (!isProxyReady(originalFilePath)) {
+          console.log('[Media Protocol] Waiting for preview proxy generation for:', originalFilePath)
+          try {
+            filePath = await ensureProxy(originalFilePath)
+          } catch (e: any) {
+            console.error('[Media Protocol] Failed to generate preview proxy:', e)
+            return new Response('Gagal memproses preview MXF: ' + (e?.message || ''), { status: 500 })
+          }
+        } else {
+          filePath = getProxyPath(originalFilePath)
+        }
       }
 
       const stat = fs.statSync(filePath)
@@ -242,7 +260,8 @@ ipcMain.handle('dialog:openFiles', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Video Files', extensions: ['mp4', 'mov', 'mkv', 'avi', 'ts', 'webm', 'm4v'] },
+      { name: 'Video Files', extensions: ['mp4', 'mov', 'mkv', 'avi', 'ts', 'webm', 'm4v', 'mxf'] },
+      { name: 'Broadcast MXF Files (*.mxf)', extensions: ['mxf'] },
       { name: 'All Files', extensions: ['*'] }
     ]
   })
@@ -251,6 +270,14 @@ ipcMain.handle('dialog:openFiles', async () => {
 
 ipcMain.handle('metadata:get', async (_event, filePath: string) => {
   return await extractMetadata(filePath)
+})
+
+ipcMain.handle('proxy:check', async (_event, filePath: string) => {
+  return isProxyReady(filePath)
+})
+
+ipcMain.handle('proxy:generate', async (_event, filePath: string) => {
+  return await ensureProxy(filePath)
 })
 
 ipcMain.handle('broadcast:start', async (_event, playlist: PlaylistItem[], config: SrtConfig, settings: EncodingSettings, currentIdx: number) => {

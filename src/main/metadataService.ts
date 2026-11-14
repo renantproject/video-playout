@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs'
 import { PlaylistItem } from '../types'
 import { getBinPath } from './ffmpegUtils'
+import { needsProxy, isProxyReady, ensureProxy } from './proxyService'
 
 // Format duration helper
 export function formatDuration(seconds: number): string {
@@ -90,6 +91,13 @@ export async function extractMetadata(filePath: string): Promise<PlaylistItem | 
         // Generate thumbnail
         const thumbnail = await generateThumbnail(filePath, durationSec)
 
+        // Check proxy requirement
+        const reqProxy = needsProxy(filePath)
+        const ready = isProxyReady(filePath)
+        if (reqProxy && !ready) {
+          ensureProxy(filePath).catch((e) => console.error('[MetadataService] Auto-proxy error:', e))
+        }
+
         resolve({
           id: `item-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           filePath,
@@ -102,7 +110,10 @@ export async function extractMetadata(filePath: string): Promise<PlaylistItem | 
           fps,
           thumbnail,
           fileSize: stat.size,
-          format: videoStream?.codec_name || ext
+          format: videoStream?.codec_name || ext,
+          needsProxy: reqProxy,
+          isProxyReady: ready,
+          proxyProgress: ready ? 100 : 0
         })
       } catch (err) {
         console.error('Error parsing ffprobe output:', err)

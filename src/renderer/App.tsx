@@ -66,7 +66,7 @@ export const App: React.FC = () => {
 
   const currentItem = playlist[currentIndex] || null
 
-  // Subscribe to Telemetry from Main Process
+  // Subscribe to Telemetry and Proxy Progress from Main Process
   useEffect(() => {
     if (window.electronAPI) {
       const cleanup = window.electronAPI.onBroadcastTelemetry((data) => {
@@ -75,9 +75,25 @@ export const App: React.FC = () => {
       const cleanupSec = window.electronAPI.onSecondaryWindowClose(() => {
         setIsSecondaryActive(false)
       })
+      const cleanupProxy = window.electronAPI.onProxyProgress?.((data) => {
+        setPlaylist((prev) =>
+          prev.map((item) => {
+            if (item.filePath === data.filePath) {
+              return {
+                ...item,
+                isProxyReady: data.status === 'ready',
+                proxyProgress: data.progress
+              }
+            }
+            return item
+          })
+        )
+      })
+
       return () => {
         cleanup()
         cleanupSec()
+        if (cleanupProxy) cleanupProxy()
       }
     }
   }, [])
@@ -218,7 +234,7 @@ export const App: React.FC = () => {
       setPlaylist((prev) => {
         const updated = [...prev, ...newItems]
         // If broadcast is running, notify backend of updated playlist
-        if (telemetry.status === 'LIVE' || telemetry.status === 'CONNECTING') {
+        if (telemetry.status === 'LIVE' || telemetry.status === 'CONNECTING' || telemetry.status === 'LISTENING') {
           window.electronAPI.updateBroadcastPlaylist(updated, currentIndex)
         }
         return updated
@@ -388,7 +404,7 @@ export const App: React.FC = () => {
           break
         case 'KeyB':
           e.preventDefault()
-          if (telemetry.status === 'LIVE' || telemetry.status === 'CONNECTING') {
+          if (telemetry.status === 'LIVE' || telemetry.status === 'CONNECTING' || telemetry.status === 'LISTENING') {
             handleStopBroadcast()
           } else {
             handleStartBroadcast()
@@ -504,7 +520,7 @@ export const App: React.FC = () => {
         telemetry={telemetry}
         onStartBroadcast={handleStartBroadcast}
         onStopBroadcast={handleStopBroadcast}
-        isBroadcasting={telemetry.status === 'LIVE' || telemetry.status === 'CONNECTING' || telemetry.status === 'RECONNECTING'}
+        isBroadcasting={telemetry.status === 'LIVE' || telemetry.status === 'CONNECTING' || telemetry.status === 'LISTENING' || telemetry.status === 'RECONNECTING'}
       />
 
       {/* Settings Modal */}
