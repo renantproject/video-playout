@@ -34,6 +34,47 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [leftLevel, setLeftLevel] = useState(0)
   const [rightLevel, setRightLevel] = useState(0)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [proxyProgress, setProxyProgress] = useState<number>(0)
+  const [isOptimizing, setIsOptimizing] = useState<boolean>(false)
+
+  // Listen for proxy progress events
+  useEffect(() => {
+    if (!window.electronAPI?.onProxyProgress) return
+
+    const cleanup = window.electronAPI.onProxyProgress((data) => {
+      if (currentItem && data.filePath === currentItem.filePath) {
+        setProxyProgress(data.progress)
+        if (data.status === 'processing') {
+          setIsOptimizing(true)
+          setLoadError(null)
+        } else if (data.status === 'ready') {
+          setIsOptimizing(false)
+          setLoadError(null)
+          // Force reload video element
+          if (videoRef.current) {
+            videoRef.current.load()
+            if (isPlaying) {
+              videoRef.current.play().catch(() => {})
+            }
+          }
+        } else if (data.status === 'error') {
+          setIsOptimizing(false)
+        }
+      }
+    })
+
+    return cleanup
+  }, [currentItem, isPlaying])
+
+  // Track initial proxy state when currentItem changes
+  useEffect(() => {
+    if (currentItem?.needsProxy && !currentItem?.isProxyReady) {
+      setIsOptimizing(true)
+      setProxyProgress(currentItem.proxyProgress || 0)
+    } else {
+      setIsOptimizing(false)
+    }
+  }, [currentItem])
 
   // Web Audio Context for Peak Meter
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -193,6 +234,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               setLoadError(null)
             }}
             onError={(e) => {
+              if (isOptimizing) return
               const err = videoRef.current?.error
               console.error('Video element error:', err)
               setLoadError(`Gagal membaca stream video: ${err?.message || 'File tidak dapat diakses'}`)
@@ -200,7 +242,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             onEnded={onEnded}
           />
 
-          {loadError && (
+          {/* Broadcast Optimization HUD (for MXF / broadcast formats) */}
+          {isOptimizing && (
+            <div className="absolute inset-0 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center z-20">
+              <div className="p-6 bg-[#141824]/95 border border-blue-500/40 rounded-xl shadow-2xl max-w-sm flex flex-col items-center">
+                <div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-3" />
+                <p className="font-semibold text-white text-sm">Menyiapkan Preview MXF Broadcast...</p>
+                <p className="text-[11px] text-gray-400 mt-1">Mengoptimalkan materi broadcast ke pratinjau real-time</p>
+                <div className="w-full bg-gray-800 h-2 rounded-full mt-4 overflow-hidden border border-white/5">
+                  <div
+                    className="bg-blue-500 h-full transition-all duration-300"
+                    style={{ width: `${Math.max(10, proxyProgress)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {loadError && !isOptimizing && (
             <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center p-6 text-center z-10">
               <div className="p-3 bg-red-950/60 border border-red-700 rounded-lg max-w-md text-red-200 text-xs">
                 <p className="font-bold text-red-400 mb-1">Peringatan Player</p>

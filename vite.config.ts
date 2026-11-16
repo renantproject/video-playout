@@ -1,3 +1,5 @@
+delete process.env.ELECTRON_RUN_AS_NODE
+
 import { defineConfig } from 'vite'
 import path from 'node:path'
 import electron from 'vite-plugin-electron/simple'

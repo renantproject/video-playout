@@ -4,18 +4,25 @@ import { PlaylistItem, SrtConfig, EncodingSettings, BroadcastTelemetry } from '.
 contextBridge.exposeInMainWorld('electronAPI', {
   openFileDialog: () => ipcRenderer.invoke('dialog:openFiles'),
 
+  openFolderDialog: () => ipcRenderer.invoke('dialog:openFolder'),
+
+  scanRundownFolder: (folderPath: string) => ipcRenderer.invoke('folder:scan', folderPath),
+
   getVideoMetadata: (filePath: string) => ipcRenderer.invoke('metadata:get', filePath),
 
-  startBroadcast: (playlist: PlaylistItem[], config: SrtConfig, settings: EncodingSettings, currentIdx: number) =>
-    ipcRenderer.invoke('broadcast:start', playlist, config, settings, currentIdx),
+  startBroadcast: (channel: 'A' | 'B', playlist: PlaylistItem[], config: SrtConfig, settings: EncodingSettings, currentIdx: number) =>
+    ipcRenderer.invoke('broadcast:start', channel, playlist, config, settings, currentIdx),
 
-  stopBroadcast: () => ipcRenderer.invoke('broadcast:stop'),
+  stopBroadcast: (channel?: 'A' | 'B') => ipcRenderer.invoke('broadcast:stop', channel),
 
-  updateBroadcastPlaylist: (playlist: PlaylistItem[], currentIdx: number) =>
-    ipcRenderer.invoke('broadcast:updatePlaylist', playlist, currentIdx),
+  switchBroadcastMedia: (channel: 'A' | 'B', clip: PlaylistItem) =>
+    ipcRenderer.invoke('broadcast:switchMedia', channel, clip),
 
-  onBroadcastTelemetry: (callback: (telemetry: BroadcastTelemetry) => void) => {
-    const handler = (_event: any, telemetry: BroadcastTelemetry) => callback(telemetry)
+  updateBroadcastPlaylist: (channel: 'A' | 'B', playlist: PlaylistItem[], currentIdx: number) =>
+    ipcRenderer.invoke('broadcast:updatePlaylist', channel, playlist, currentIdx),
+
+  onBroadcastTelemetry: (callback: (data: { channel: 'A' | 'B'; telemetry: BroadcastTelemetry }) => void) => {
+    const handler = (_event: any, data: any) => callback(data)
     ipcRenderer.on('broadcast:telemetry', handler)
     return () => ipcRenderer.removeListener('broadcast:telemetry', handler)
   },
@@ -40,6 +47,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   isSecondaryWindow: () => {
     return window.location.search.includes('mode=secondary')
+  },
+
+  onProxyProgress: (callback: (data: { filePath: string; progress: number; status: 'processing' | 'ready' | 'error' }) => void) => {
+    const handler = (_event: any, data: any) => callback(data)
+    ipcRenderer.on('proxy:progress', handler)
+    return () => ipcRenderer.removeListener('proxy:progress', handler)
+  },
+
+  checkProxyReady: (filePath: string) => ipcRenderer.invoke('proxy:check', filePath),
+
+  generateProxy: (filePath: string) => ipcRenderer.invoke('proxy:generate', filePath),
+
+  onGlobalShortcut: (callback: (shortcut: string) => void) => {
+    const handler = (_event: any, key: string) => callback(key)
+    ipcRenderer.on('global:shortcut', handler)
+    return () => ipcRenderer.removeListener('global:shortcut', handler)
+  },
+
+  openLogFile: () => ipcRenderer.invoke('app:openLog'),
+
+  onProxyQueueStatus: (callback: (status: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data)
+    ipcRenderer.on('proxy:queueStatus', handler)
+    return () => ipcRenderer.removeListener('proxy:queueStatus', handler)
   }
 })
 
