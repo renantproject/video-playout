@@ -408,44 +408,6 @@ export const RundownQueue: React.FC<RundownQueueProps> = ({
           </div>
         )}
       </div>
-
-      {/* Footer Shortcut Legend */}
-      <div className="p-2.5 bg-[#0b0e16] border-t border-[#23293d] shrink-0 text-[10px] text-gray-400 font-mono">
-        <div className="grid grid-cols-2 gap-1.5">
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-blue-900/60 text-blue-300 font-bold border border-blue-500/30">F1</span>
-            <span>Tarik ke CH A</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-bold border border-emerald-500/30">F5</span>
-            <span>Tarik ke CH B</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-blue-900/60 text-blue-300 font-bold border border-blue-500/30">F2</span>
-            <span>Next Item CH A</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-bold border border-emerald-500/30">F6</span>
-            <span>Next Item CH B</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-blue-900/60 text-blue-300 font-bold border border-blue-500/30">F3</span>
-            <span>Play/Stop CH A</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-emerald-900/60 text-emerald-300 font-bold border border-emerald-500/30">F7</span>
-            <span>Play/Stop CH B</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-300 font-bold border border-amber-500/30">F4</span>
-            <span>Loop CH A</span>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="px-1 py-0.5 rounded bg-amber-900/60 text-amber-300 font-bold border border-amber-500/30">F8</span>
-            <span>Loop CH B</span>
-          </div>
-        </div>
-      </div>
     </div>
   )
 }
