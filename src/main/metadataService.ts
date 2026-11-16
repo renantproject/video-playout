@@ -91,8 +91,9 @@ export async function extractMetadata(filePath: string): Promise<PlaylistItem | 
         // Generate thumbnail
         const thumbnail = await generateThumbnail(filePath, durationSec)
 
-        // Check proxy requirement
-        const reqProxy = needsProxy(filePath)
+        // Check proxy requirement (both container and video codec)
+        const codecName = videoStream?.codec_name || ext
+        const reqProxy = needsProxy(filePath, codecName)
         const ready = isProxyReady(filePath)
         if (reqProxy && !ready) {
           ensureProxy(filePath).catch((e) => console.error('[MetadataService] Auto-proxy error:', e))
@@ -153,20 +154,39 @@ function generateThumbnail(filePath: string, duration: number): Promise<string |
 
     const ffmpeg = spawn(getBinPath('ffmpeg'), ffmpegArgs)
     const buffers: Buffer[] = []
+    let isSettled = false
+
+    const timer = setTimeout(() => {
+      if (!isSettled) {
+        isSettled = true
+        try { ffmpeg.kill() } catch (e) {}
+        resolve(undefined)
+      }
+    }, 2500)
 
     ffmpeg.stdout.on('data', (chunk) => {
       buffers.push(Buffer.from(chunk))
     })
 
-    ffmpeg.on('error', () => resolve(undefined))
+    ffmpeg.on('error', () => {
+      if (!isSettled) {
+        isSettled = true
+        clearTimeout(timer)
+        resolve(undefined)
+      }
+    })
 
     ffmpeg.on('close', (code) => {
-      if (code === 0 && buffers.length > 0) {
-        const fullBuffer = Buffer.concat(buffers)
-        const base64 = `data:image/jpeg;base64,${fullBuffer.toString('base64')}`
-        resolve(base64)
-      } else {
-        resolve(undefined)
+      if (!isSettled) {
+        isSettled = true
+        clearTimeout(timer)
+        if (code === 0 && buffers.length > 0) {
+          const fullBuffer = Buffer.concat(buffers)
+          const base64 = `data:image/jpeg;base64,${fullBuffer.toString('base64')}`
+          resolve(base64)
+        } else {
+          resolve(undefined)
+        }
       }
     })
   })

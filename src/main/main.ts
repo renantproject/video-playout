@@ -1,12 +1,14 @@
-import { app, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { Readable } from 'stream'
 import { FfmpegManager } from './ffmpegManager'
 import { extractMetadata } from './metadataService'
-import { needsProxy, isProxyReady, ensureProxy, getProxyPath } from './proxyService'
+import { needsProxy, isProxyReady, ensureProxy, getProxyPath, queueBatchProxies } from './proxyService'
+import { scanRundownFolder } from './rundownService'
 import { PlaylistItem, SrtConfig, EncodingSettings } from '../types'
+import { logger } from './logger'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -31,7 +33,8 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null
 let secondaryWindow: BrowserWindow | null = null
-let ffmpegManager: FfmpegManager | null = null
+let ffmpegManagerA: FfmpegManager | null = null
+let ffmpegManagerB: FfmpegManager | null = null
 
 function getMimeType(filePath: string): string {
   const ext = path.extname(filePath).toLowerCase()
@@ -48,9 +51,12 @@ function getMimeType(filePath: string): string {
 }
 
 function resolveFilePathFromUrl(url: string): string {
+  // Strip query parameters e.g. ?v=...
+  const cleanUrl = url.split('?')[0]
+
   // 1. Try fileURLToPath first
   try {
-    const fileUrl = url.replace(/^media-file:\/\//, 'file://')
+    const fileUrl = cleanUrl.replace(/^media-file:\/\//, 'file://')
     const parsed = fileURLToPath(fileUrl)
     if (fs.existsSync(parsed)) return parsed
   } catch (e) {
@@ -58,7 +64,7 @@ function resolveFilePathFromUrl(url: string): string {
   }
 
   // 2. Decode raw path from custom URL
-  let raw = decodeURIComponent(url.replace(/^media-file:\/\/\/?/, ''))
+  let raw = decodeURIComponent(cleanUrl.replace(/^media-file:\/\/\/?/, ''))
 
   if (process.platform === 'win32') {
     // Handle leading slash e.g. /C:/path -> C:/path
@@ -80,19 +86,19 @@ function setupMediaProtocol() {
       let filePath = originalFilePath
 
       if (!fs.existsSync(originalFilePath)) {
-        console.error('[Media Protocol] File not found:', originalFilePath, 'from request URL:', request.url)
+        logger.error('MediaProtocol', `File not found: ${originalFilePath} from request URL: ${request.url}`)
         return new Response('File not found: ' + originalFilePath, { status: 404 })
       }
 
       // Check if file is non-native format (like MXF) that Chromium cannot demux/decode
       if (needsProxy(originalFilePath)) {
         if (!isProxyReady(originalFilePath)) {
-          console.log('[Media Protocol] Waiting for preview proxy generation for:', originalFilePath)
+          logger.info('MediaProtocol', `Preview requested for non-ready media "${path.basename(originalFilePath)}", prioritizing proxy generation...`)
           try {
-            filePath = await ensureProxy(originalFilePath)
+            filePath = await ensureProxy(originalFilePath, 'high')
           } catch (e: any) {
-            console.error('[Media Protocol] Failed to generate preview proxy:', e)
-            return new Response('Gagal memproses preview MXF: ' + (e?.message || ''), { status: 500 })
+            logger.error('MediaProtocol', `Failed to generate preview proxy for "${path.basename(originalFilePath)}":`, e)
+            return new Response('Gagal memproses preview: ' + (e?.message || ''), { status: 500 })
           }
         } else {
           filePath = getProxyPath(originalFilePath)
@@ -173,17 +179,32 @@ function createMainWindow() {
     }
   })
 
-  // Initialize FFmpeg manager
-  ffmpegManager = new FfmpegManager((telemetry) => {
+  // Initialize Dual FFmpeg managers (Channel A & Channel B)
+  ffmpegManagerA = new FfmpegManager('A', (channel, telemetry) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('broadcast:telemetry', telemetry)
+      mainWindow.webContents.send('broadcast:telemetry', { channel, telemetry })
     }
   })
 
-  // Enable DevTools shortcut (F12 or Ctrl+Shift+I)
+  ffmpegManagerB = new FfmpegManager('B', (channel, telemetry) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('broadcast:telemetry', { channel, telemetry })
+    }
+  })
+
+  // Enable DevTools shortcut (F12 or Ctrl+Shift+I) and prevent F-key defaults (F5 reload, F1 help, etc.)
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i')) {
       mainWindow?.webContents.toggleDevTools()
+      return
+    }
+
+    // Intercept functional playout keys to prevent default browser behavior
+    if (['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8'].includes(input.key)) {
+      event.preventDefault()
+      if (input.type === 'keyDown') {
+        mainWindow?.webContents.send('global:shortcut', input.key)
+      }
     }
   })
 
@@ -199,8 +220,11 @@ function createMainWindow() {
     if (secondaryWindow && !secondaryWindow.isDestroyed()) {
       secondaryWindow.close()
     }
-    if (ffmpegManager) {
-      ffmpegManager.stopBroadcast()
+    if (ffmpegManagerA) {
+      ffmpegManagerA.stopBroadcast()
+    }
+    if (ffmpegManagerB) {
+      ffmpegManagerB.stopBroadcast()
     }
   })
 }
@@ -241,6 +265,8 @@ function createSecondaryWindow() {
 }
 
 app.whenReady().then(() => {
+  logger.info('App', '=== PlayoutStream Application Started ===')
+  logger.info('App', `OS: ${process.platform} ${process.arch}, Node: ${process.version}, Electron: ${process.versions.electron}`)
   setupMediaProtocol()
   createMainWindow()
 
@@ -265,7 +291,60 @@ ipcMain.handle('dialog:openFiles', async () => {
       { name: 'All Files', extensions: ['*'] }
     ]
   })
-  return result.filePaths || []
+  const files = result.filePaths || []
+  if (files.length > 0) {
+    logger.info('Main', `User opened ${files.length} files via file dialog. Queueing proxies...`)
+    queueBatchProxies(files)
+  }
+  return files
+})
+
+ipcMain.handle('dialog:openFolder', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openDirectory'],
+    title: 'Pilih Folder Program / Rundown'
+  })
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+    return null
+  }
+  const folderPath = result.filePaths[0]
+  logger.info('Main', `User opened rundown folder: ${folderPath}`)
+  const program = await scanRundownFolder(folderPath)
+  if (program) {
+    const allFiles: string[] = []
+    for (const g of program.groups) {
+      for (const item of g.items) {
+        allFiles.push(item.filePath)
+      }
+    }
+    logger.info('Main', `Pre-queueing background proxies for ${allFiles.length} clips from "${program.name}"`)
+    queueBatchProxies(allFiles)
+  }
+  return program
+})
+
+ipcMain.handle('folder:scan', async (_event, folderPath: string) => {
+  if (!folderPath) return null
+  const program = await scanRundownFolder(folderPath)
+  if (program) {
+    const allFiles: string[] = []
+    for (const g of program.groups) {
+      for (const item of g.items) {
+        allFiles.push(item.filePath)
+      }
+    }
+    queueBatchProxies(allFiles)
+  }
+  return program
+})
+
+ipcMain.handle('app:openLog', async () => {
+  const logPath = logger.getPrimaryLogPath()
+  if (fs.existsSync(logPath)) {
+    shell.openPath(logPath)
+    return { success: true, path: logPath }
+  }
+  return { success: false, message: 'Log file not found' }
 })
 
 ipcMain.handle('metadata:get', async (_event, filePath: string) => {
@@ -277,22 +356,55 @@ ipcMain.handle('proxy:check', async (_event, filePath: string) => {
 })
 
 ipcMain.handle('proxy:generate', async (_event, filePath: string) => {
-  return await ensureProxy(filePath)
+  return await ensureProxy(filePath, 'high')
 })
 
-ipcMain.handle('broadcast:start', async (_event, playlist: PlaylistItem[], config: SrtConfig, settings: EncodingSettings, currentIdx: number) => {
-  if (!ffmpegManager) return { success: false, message: 'FFmpeg manager not initialized' }
-  return await ffmpegManager.startBroadcast(playlist, config, settings, currentIdx)
+ipcMain.handle(
+  'broadcast:start',
+  async (
+    _event,
+    channel: 'A' | 'B',
+    playlist: PlaylistItem[],
+    config: SrtConfig,
+    settings: EncodingSettings,
+    currentIdx: number
+  ) => {
+    logger.info('Main', `Broadcast START requested for Channel ${channel}`, {
+      port: config.port,
+      mode: config.mode,
+      bitrate: settings.videoBitrate,
+      clip: playlist[currentIdx]?.fileName
+    })
+    const manager = channel === 'B' ? ffmpegManagerB : ffmpegManagerA
+    if (!manager) return { success: false, message: `FFmpeg manager Channel ${channel} not initialized` }
+    return await manager.startBroadcast(playlist, config, settings, currentIdx)
+  }
+)
+
+ipcMain.handle('broadcast:stop', async (_event, channel?: 'A' | 'B') => {
+  logger.info('Main', `Broadcast STOP requested for Channel ${channel || 'ALL'}`)
+  if (channel === 'A') {
+    return ffmpegManagerA ? ffmpegManagerA.stopBroadcast() : { success: true }
+  } else if (channel === 'B') {
+    return ffmpegManagerB ? ffmpegManagerB.stopBroadcast() : { success: true }
+  } else {
+    const resA = ffmpegManagerA?.stopBroadcast()
+    const resB = ffmpegManagerB?.stopBroadcast()
+    return { success: (resA?.success ?? true) && (resB?.success ?? true) }
+  }
 })
 
-ipcMain.handle('broadcast:stop', async () => {
-  if (!ffmpegManager) return { success: false }
-  return ffmpegManager.stopBroadcast()
+ipcMain.handle('broadcast:switchMedia', async (_event, channel: 'A' | 'B', clip: PlaylistItem) => {
+  logger.info('Main', `Broadcast switchMedia requested for Channel ${channel} -> ${clip.fileName}`)
+  const manager = channel === 'B' ? ffmpegManagerB : ffmpegManagerA
+  if (!manager) return { success: false, message: `Manager for Channel ${channel} not found` }
+  return await manager.switchMedia(clip)
 })
 
-ipcMain.handle('broadcast:updatePlaylist', async (_event, playlist: PlaylistItem[], currentIdx: number) => {
-  if (ffmpegManager) {
-    ffmpegManager.updatePlaylist(playlist, currentIdx)
+ipcMain.handle('broadcast:updatePlaylist', async (_event, channel: 'A' | 'B', playlist: PlaylistItem[], currentIdx: number) => {
+  const manager = channel === 'B' ? ffmpegManagerB : ffmpegManagerA
+  if (manager) {
+    manager.updatePlaylist(playlist, currentIdx)
   }
 })
 

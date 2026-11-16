@@ -5,11 +5,13 @@ import os from 'os'
 import { PlaylistItem, SrtConfig, EncodingSettings, BroadcastTelemetry, BroadcastStatus } from '../types'
 import { getBinPath } from './ffmpegUtils'
 import { getPlayablePath } from './proxyService'
+import { logger } from './logger'
 
 export class FfmpegManager {
+  private channelId: 'A' | 'B'
   private process: ChildProcess | null = null
   private status: BroadcastStatus = 'IDLE'
-  private telemetryCallback: ((telemetry: BroadcastTelemetry) => void) | null = null
+  private telemetryCallback: ((channel: 'A' | 'B', telemetry: BroadcastTelemetry) => void) | null = null
   private tempPlaylistPath: string | null = null
   private startTime: number = 0
   private currentClip: string = ''
@@ -33,7 +35,8 @@ export class FfmpegManager {
     currentClip: ''
   }
 
-  constructor(telemetryCallback: (telemetry: BroadcastTelemetry) => void) {
+  constructor(channelId: 'A' | 'B', telemetryCallback: (channel: 'A' | 'B', telemetry: BroadcastTelemetry) => void) {
+    this.channelId = channelId
     this.telemetryCallback = telemetryCallback
   }
 
@@ -53,14 +56,14 @@ export class FfmpegManager {
       if (this.status === 'LIVE' && this.startTime > 0) {
         this.telemetry.uptime = Math.floor((Date.now() - this.startTime) / 1000)
       }
-      this.telemetryCallback({ ...this.telemetry })
+      this.telemetryCallback(this.channelId, { ...this.telemetry })
     }
   }
 
   // Create concat playlist file
   private generateConcatPlaylist(items: PlaylistItem[], startIdx: number = 0): string {
     const tempDir = os.tmpdir()
-    const playlistFile = path.join(tempDir, `playout_concat_${Date.now()}.txt`)
+    const playlistFile = path.join(tempDir, `playout_concat_${this.channelId}_${Date.now()}.txt`)
     
     // Order playlist starting from currentIdx
     const orderedItems = [
@@ -80,6 +83,43 @@ export class FfmpegManager {
     return playlistFile
   }
 
+  public async switchMedia(clip: PlaylistItem): Promise<{ success: boolean; message?: string }> {
+    if (!this.currentConfig || !this.currentSettings) {
+      return { success: false, message: 'Broadcast belum dikonfigurasi' }
+    }
+    // Only switch if broadcast is active
+    if (!this.process && this.status !== 'LIVE' && this.status !== 'LISTENING' && this.status !== 'CONNECTING') {
+      return { success: true }
+    }
+
+    logger.info('FFmpegManager', `[CH ${this.channelId}] Switching stream to new media: ${clip.fileName}`)
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+
+    if (this.process) {
+      const oldProc = this.process
+      this.process = null
+      oldProc.removeAllListeners('close')
+      oldProc.removeAllListeners('exit')
+      try {
+        oldProc.kill()
+      } catch (e) {}
+    }
+
+    this.cleanupTempFile()
+    this.currentPlaylist = [clip]
+    this.currentClip = clip.fileName
+    this.telemetry.currentClip = clip.fileName
+
+    // Wait a brief 150ms moment for OS socket cleanup
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    return await this.startBroadcast([clip], this.currentConfig, this.currentSettings, 0)
+  }
+
   public async startBroadcast(
     playlist: PlaylistItem[],
     config: SrtConfig,
@@ -91,7 +131,12 @@ export class FfmpegManager {
     }
 
     if (this.process) {
-      this.stopBroadcast()
+      const oldProc = this.process
+      this.process = null
+      try {
+        oldProc.kill()
+      } catch (e) {}
+      await new Promise((resolve) => setTimeout(resolve, 150))
     }
 
     this.userStopped = false
@@ -108,16 +153,49 @@ export class FfmpegManager {
     }
 
     try {
-      // Create concat playlist file
-      this.tempPlaylistPath = this.generateConcatPlaylist(playlist, startIdx)
+      // Determine input args: single active clip loops continuously, multiple uses concat
+      const isSingleClip = playlist.length === 1
+      const inputArgs: string[] = []
 
-      // Build SRT target URL
-      // Latency in microseconds: ms * 1000
+      if (isSingleClip) {
+        const directPath = playlist[0].filePath
+        inputArgs.push(
+          '-stream_loop', '-1', // Loop active clip continuously until changed or stopped
+          '-re',
+          '-i', directPath
+        )
+      } else {
+        this.tempPlaylistPath = this.generateConcatPlaylist(playlist, startIdx)
+        inputArgs.push(
+          '-re',
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', this.tempPlaylistPath
+        )
+      }
+
+      // Scaling and standardization filter
+      const [w, h] = (settings.resolution || '1920x1080').split('x')
+      const targetWidth = parseInt(w) || 1920
+      const targetHeight = parseInt(h) || 1080
+      const fps = settings.fps || 25
+
+      const videoFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`
+
+      // CBR vs VBR rate control (Default strict CBR for rock-solid broadcast)
+      const isCBR = settings.rateControl !== 'VBR'
+      const vBitrate = settings.videoBitrate || 25000 // Default 25 Mbps
+      const aBitrate = settings.audioBitrate || 192
+      const bufSize = vBitrate // 1-second VBV buffer for constant bitrate
+      const gop = settings.gopSize || Math.round(fps * 2)
+
+      // SRT Target URL with 64MB buffers, linger=0 for instant release, and unlimited bandwidth
       const latencyUs = (config.latency || 200) * 1000
-      let srtUrl = `srt://${config.host || '127.0.0.1'}:${config.port || 9000}?mode=${config.mode}&transtype=live&latency=${latencyUs}&pkt_size=1316`
+      const srtParams = `latency=${latencyUs}&pkt_size=1316&sndbuf=67108864&rcvbuf=67108864&maxbw=0&linger=0`
+      let srtUrl = `srt://${config.host || '127.0.0.1'}:${config.port || 9000}?mode=${config.mode}&transtype=live&${srtParams}`
 
       if (config.mode === 'listener') {
-        srtUrl = `srt://0.0.0.0:${config.port || 9000}?mode=listener&transtype=live&latency=${latencyUs}&pkt_size=1316`
+        srtUrl = `srt://0.0.0.0:${config.port || 9000}?mode=listener&transtype=live&${srtParams}`
       }
 
       if (config.streamId && config.streamId.trim().length > 0) {
@@ -131,64 +209,110 @@ export class FfmpegManager {
         }
       }
 
-      // Scaling and standardization filter
-      // E.g. 1920x1080 or custom
-      const [w, h] = (settings.resolution || '1920x1080').split('x')
-      const targetWidth = parseInt(w) || 1920
-      const targetHeight = parseInt(h) || 1080
-      const fps = settings.fps || 60
-
-      const videoFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2,fps=${fps},format=yuv420p`
-
       // Encoder selection
       let videoCodec = 'libx264'
       const videoArgs: string[] = []
 
       if (settings.hwaccel === 'nvenc') {
         videoCodec = 'h264_nvenc'
-        videoArgs.push('-c:v', videoCodec, '-preset', 'p4', '-tune', 'll')
+        videoArgs.push(
+          '-c:v', videoCodec,
+          '-preset', 'p2',
+          '-tune', 'll',
+          '-zerolatency', '1',
+          '-delay', '0'
+        )
+        if (isCBR) {
+          videoArgs.push(
+            '-rc:v', 'cbr',
+            '-cbr', '1',
+            '-b:v', `${vBitrate}k`,
+            '-minrate', `${vBitrate}k`,
+            '-maxrate', `${vBitrate}k`,
+            '-bufsize', `${bufSize}k`
+          )
+        } else {
+          videoArgs.push(
+            '-b:v', `${vBitrate}k`,
+            '-maxrate', `${Math.round(vBitrate * 1.2)}k`,
+            '-bufsize', `${vBitrate * 2}k`
+          )
+        }
       } else if (settings.hwaccel === 'qsv') {
         videoCodec = 'h264_qsv'
         videoArgs.push('-c:v', videoCodec, '-preset', 'veryfast')
+        if (isCBR) {
+          videoArgs.push(
+            '-b:v', `${vBitrate}k`,
+            '-minrate', `${vBitrate}k`,
+            '-maxrate', `${vBitrate}k`,
+            '-bufsize', `${bufSize}k`
+          )
+        }
       } else if (settings.hwaccel === 'amf') {
         videoCodec = 'h264_amf'
         videoArgs.push('-c:v', videoCodec, '-quality', 'speed')
+        if (isCBR) {
+          videoArgs.push(
+            '-rc', 'cbr',
+            '-b:v', `${vBitrate}k`,
+            '-minrate', `${vBitrate}k`,
+            '-maxrate', `${vBitrate}k`,
+            '-bufsize', `${bufSize}k`
+          )
+        }
       } else {
+        // Universal CPU libx264: Locked strict CBR with Zero Latency to eliminate frame drops & stutter
         videoCodec = 'libx264'
-        videoArgs.push('-c:v', videoCodec, '-preset', settings.preset || 'veryfast')
+        videoArgs.push(
+          '-c:v', videoCodec,
+          '-preset', settings.preset || 'ultrafast',
+          '-tune', 'zerolatency'
+        )
+        if (isCBR) {
+          videoArgs.push(
+            '-b:v', `${vBitrate}k`,
+            '-minrate', `${vBitrate}k`,
+            '-maxrate', `${vBitrate}k`,
+            '-bufsize', `${bufSize}k`,
+            '-nal-hrd', 'cbr',
+            '-x264-params', 'nal-hrd=cbr:force-cfr=1'
+          )
+        } else {
+          videoArgs.push(
+            '-b:v', `${vBitrate}k`,
+            '-maxrate', `${Math.round(vBitrate * 1.2)}k`,
+            '-bufsize', `${vBitrate * 2}k`
+          )
+        }
       }
 
-      const vBitrate = settings.videoBitrate || 4500
-      const maxRate = Math.round(vBitrate * 1.15)
-      const bufSize = Math.round(vBitrate * 2)
-      const gop = settings.gopSize || (fps * 2)
-
-      videoArgs.push(
-        '-b:v', `${vBitrate}k`,
-        '-maxrate', `${maxRate}k`,
-        '-bufsize', `${bufSize}k`,
-        '-g', gop.toString()
-      )
+      videoArgs.push('-g', gop.toString())
 
       const args = [
-        '-re', // Real-time playout
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', this.tempPlaylistPath,
+        ...inputArgs,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
         '-vf', videoFilter,
         ...videoArgs,
         '-c:a', 'aac',
-        '-b:a', `${settings.audioBitrate || 128}k`,
+        '-b:a', `${aBitrate}k`,
         '-ar', '48000',
         '-ac', '2',
+        '-af', 'aresample=async=1:first_pts=0',
+        '-streamid', '0:256',
+        '-streamid', '1:257',
+        '-muxdelay', '0',
+        '-muxpreload', '0',
         '-f', 'mpegts',
+        '-mpegts_flags', '+resend_headers+pat_pmt_at_frames',
         '-progress', 'pipe:1',
         '-stats_period', '0.5',
         srtUrl
       ]
 
       const ffmpegExe = getBinPath('ffmpeg')
-      console.log('Spawning FFmpeg at:', ffmpegExe, 'with args:', args.join(' '))
+      logger.info('FFmpegManager', `[CH ${this.channelId}] Spawning FFmpeg at ${ffmpegExe} with args: ${args.join(' ')}`)
 
       this.process = spawn(ffmpegExe, args)
       this.startTime = Date.now()
@@ -213,6 +337,7 @@ export class FfmpegManager {
         // In caller or listener mode, detect active output frames
         if ((this.status === 'CONNECTING' || this.status === 'LISTENING') && (text.includes('Output #0, mpegts') || text.includes('frame='))) {
           this.updateStatus('LIVE')
+          logger.event('FFmpegManager', `[CH ${this.channelId}] Broadcast is now LIVE on air!`)
         }
 
         // Parse possible SRT RTT or drop stats from stderr
@@ -222,27 +347,29 @@ export class FfmpegManager {
         }
       })
 
-      this.process.on('error', (err) => {
-        console.error('FFmpeg process error:', err)
+      const currentProc = this.process
+      currentProc.on('error', (err) => {
+        if (this.process !== currentProc) return
+        logger.error('FFmpegManager', `[CH ${this.channelId}] FFmpeg process error:`, err)
         this.updateStatus('ERROR', err.message)
       })
 
-      this.process.on('close', (code) => {
-        console.log(`FFmpeg process exited with code ${code}`)
+      currentProc.on('close', (code) => {
+        if (this.process !== currentProc) return
+        logger.info('FFmpegManager', `[CH ${this.channelId}] FFmpeg process exited with code ${code}`)
         this.cleanupTempFile()
         this.process = null
 
         if (!this.userStopped) {
           if (this.currentConfig?.mode === 'listener') {
-            // In listener mode, client (VLC/OBS) disconnected.
-            // Automatically re-open the listener socket after 1.5s delay to clear TIME_WAIT.
-            console.log('[FFmpegManager] Receiver disconnected in listener mode. Re-listening...')
+            logger.info('FFmpegManager', `[CH ${this.channelId}] Client disconnected in listener mode. Re-listening...`)
             this.updateStatus('LISTENING')
             this.attemptReconnect(1500)
           } else {
             if (code === 0) {
               this.updateStatus('IDLE')
             } else {
+              logger.warn('FFmpegManager', `[CH ${this.channelId}] FFmpeg exited unexpectedly with error code ${code}`)
               this.updateStatus('ERROR', `FFmpeg exited with error code ${code}`)
               this.attemptReconnect(3000)
             }
@@ -333,23 +460,13 @@ export class FfmpegManager {
     }
 
     if (this.process) {
+      const oldProc = this.process
+      this.process = null
+      oldProc.removeAllListeners('close')
+      oldProc.removeAllListeners('exit')
       try {
-        // Send 'q' to FFmpeg for clean shutdown
-        this.process.stdin?.write('q\n')
-      } catch (e) {
-        // Ignore
-      }
-
-      setTimeout(() => {
-        if (this.process) {
-          try {
-            this.process.kill('SIGKILL')
-          } catch (e) {
-            // Ignore
-          }
-          this.process = null
-        }
-      }, 500)
+        oldProc.kill()
+      } catch (e) {}
     }
 
     this.cleanupTempFile()
